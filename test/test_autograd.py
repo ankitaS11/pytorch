@@ -7198,8 +7198,32 @@ class TestAutogradForwardModeBatchedGrad(TestCase):
     def test_out_of_place_basic(self):
         a = torch.rand(4, 4, dtype=torch.double, requires_grad=True)
         b = torch.rand(4, 4, dtype=torch.double, requires_grad=True)
-        self.assertTrue(gradcheck(torch.sin, a))
-        self.assertTrue(gradcheck(torch.add, (a, b)))
+        self.assertTrue(gradcheck(torch.sin, a, check_forward_ad=True, check_batched_grad=True,
+                                  check_batched_forward_grad=True))
+        self.assertTrue(gradcheck(torch.add, (a, b), check_forward_ad=True, check_batched_grad=True,
+                                  check_batched_forward_grad=True))
+
+    def test_out_of_place_not_same_layout(self):
+        input = torch.zeros([2, 2]).transpose(0, 1)
+        tangent = torch.zeros([2, 2, 2])
+
+        def jvp(tangent):
+            with fwAD.dual_level():
+                dual_tensor = fwAD.make_dual(input, tangent)
+                return fwAD.unpack_dual(dual_tensor)[1]
+        torch._vmap_internals._vmap(jvp, 0, 0)(tangent)
+
+    def test_inplace_on_view_not_same_layout(self):
+        input = torch.zeros([2, 2])
+        tangent = torch.zeros([2, 2, 2])
+        view = torch.zeros([2, 2]).transpose(0, 1)
+
+        def jvp(tangent):
+            with fwAD.dual_level():
+                dual_tensor = fwAD.make_dual(input, tangent)
+                view.copy_(dual_tensor)
+                return fwAD.unpack_dual(dual_tensor)[1]
+        torch._vmap_internals._vmap(jvp, 0, 0)(tangent)
 
 class TestAutogradForwardMode(TestCase):
     def tearDown(self):
@@ -7560,6 +7584,67 @@ class TestAutogradForwardMode(TestCase):
 
             # No differentiable outputs, shouldn't error
             eq = foo == bar
+
+    def test_create_new_zeros_with_same_meta(self):
+        new_zeroes_fn = torch.ops.aten._new_zeros_with_same_feature_meta
+
+        def check(a, b):
+            def assert_same_meta(t, target):
+                import operator
+
+                for num_bdim in range(t.dim()):
+                    result = new_zeroes_fn(t, target, num_bdim)
+                    target = target
+
+                    self.assertEqual(result.dim(), target.dim() + num_bdim)
+
+                    # Check size/strides match for feature dims only
+                    for i in range(num_bdim, result.dim()):
+                        self.assertEqual(result.size()[i], target.size()[i - num_bdim])
+                        self.assertEqual(result.stride()[i], target.stride()[i - num_bdim])
+
+                    # Check that we generate strides reasonably
+                    if target.is_contiguous():
+                        self.assertTrue(result.is_contiguous())
+
+                    self.assertEqual(result.storage_offset(), target.storage_offset())
+
+                    prod_of_t_bdims = reduce(operator.mul, t.size()[:num_bdim], 1)
+                    self.assertEqual(len(result.storage()), len(target.storage()) * prod_of_t_bdims)
+
+                    # TensorOptions is same
+                    self.assertEqual(result.dtype, target.dtype)
+
+            assert_same_meta(a, b)
+            assert_same_meta(b, a)
+
+        a = torch.randn(5, dtype=torch.float)
+        b = torch.randn(2, 3, 4, dtype=torch.double)
+        check(a, b)
+
+        # non-contiguous case
+        a = torch.randn(2, 3, 4).transpose(0,1).contiguous().transpose(0, 1)
+        b = torch.randn(2, 3, 4)
+        check(a, b)
+
+        a = torch.randn(5).narrow(0, 1, 2)
+        b = torch.randn(2)
+        check(a, b)
+
+        # tensor is not a view, but still does not index entirety of storage
+        a = torch.randn(5).resize_(4)
+        b = torch.randn(4)
+        check(a, b)
+
+        # Zero-numel tensors
+        a = torch.randn(1, 0, 2)
+        b = torch.randn(1, 2)
+        check(a, b)
+
+        # Scalar tensor
+        a = torch.tensor(1.)
+        b = torch.randn(1, 2)
+        check(a, b)
 
     def test_backward_graph_destruction(self):
         def fn():
