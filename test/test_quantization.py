@@ -114,5 +114,8 @@ try:
 except ImportError:
     pass
 
+from quantization.test_quantize_dbr import TestQuantizeDBR  # noqa: F401
+from quantization.test_quantize_dbr import TestQuantizeDBRModels  # noqa: F401
+
 if __name__ == '__main__':
     run_tests()
