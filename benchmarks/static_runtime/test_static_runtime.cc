@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 #include <torch/csrc/jit/ir/alias_analysis.h>
 #include <torch/csrc/jit/ir/irparser.h>
+#include <torch/csrc/jit/runtime/static/ProcessedNodeInputs.h>
 #include <torch/csrc/jit/runtime/static/fusion.h>
 #include <torch/csrc/jit/runtime/static/impl.h>
 #include <torch/csrc/jit/runtime/static/passes.h>
@@ -1165,11 +1166,57 @@ TEST(StaticRuntime, FusionPass) {
   }
 }
 
-static std::unique_ptr<uint16_t[]> makeInputsArray(
-    std::initializer_list<uint16_t> vals) {
-  auto result = std::make_unique<uint16_t[]>(vals.size());
-  std::copy(vals.begin(), vals.end(), result.get());
+static ProcessedNodeInputs createProcessedNodeInputs(
+    c10::ArrayRef<uint16_t> inputs) {
+  ProcessedNodeInputs result(inputs.size());
+  for (const auto idx : c10::irange(inputs.size())) {
+    result[idx] = inputs[idx];
+  }
   return result;
+}
+
+static void checkProcessedNodeInputs(
+    const ProcessedNodeInputs& io,
+    c10::ArrayRef<uint16_t> inputs) {
+  ASSERT_EQ(inputs.size(), io.size());
+  for (const auto idx : c10::irange(inputs.size())) {
+    EXPECT_EQ(inputs[idx], io[idx]);
+  }
+}
+
+static void testProcessedNodeInputsRoundTrip(c10::ArrayRef<uint16_t> inputs) {
+  auto io = createProcessedNodeInputs(inputs);
+  checkProcessedNodeInputs(io, inputs);
+
+  ProcessedNodeInputs copied(io);
+  checkProcessedNodeInputs(copied, inputs);
+  ProcessedNodeInputs moved(std::move(io));
+  checkProcessedNodeInputs(moved, inputs);
+}
+
+TEST(ProcessedNodeInputs, Basic) {
+  std::vector<std::vector<uint16_t>> testCases = {
+      {}, // empty
+      {0xABCD, 0x5a5a}, // inline
+      {0x11, 0x22, 0x33, 0x44, 0x55}, // max inline size
+      {0x11, 0x22, 0x33, 0x44, 0x55, 0x66}, // minimum outline size
+      std::vector<uint16_t>(100, 0x5a), // large outline size
+  };
+
+  for (const auto& values : testCases) {
+    testProcessedNodeInputsRoundTrip(values);
+    for (const auto& values2 : testCases) {
+      auto from = createProcessedNodeInputs(values);
+      auto to = createProcessedNodeInputs(values2);
+
+      to = from;
+      checkProcessedNodeInputs(to, values);
+
+      auto toMoveInto = createProcessedNodeInputs(values2);
+      toMoveInto = std::move(from);
+      checkProcessedNodeInputs(toMoveInto, values);
+    }
+  }
 }
 
 TEST(
@@ -1181,7 +1228,7 @@ TEST(
   torch::jit::StaticModule smodule(module);
   Node* sigmoid_node = getNodeWithKind(smodule, "aten::sigmoid");
   IValue values[] = {torch::randn({2, 3}), torch::randn({3, 1})};
-  ProcessedNode pnode(sigmoid_node, makeInputsArray({0}), 1, 1, true);
+  ProcessedNode pnode(sigmoid_node, createProcessedNodeInputs({0}), 1, true);
   pnode.set_values(values);
 
   ASSERT_EQ(&pnode.Output(0), &values[1]);
@@ -1200,7 +1247,7 @@ TEST(
   torch::jit::StaticModule smodule(module);
   Node* sigmoid_node = getNodeWithKind(smodule, "aten::sigmoid");
   IValue values[] = {torch::randn({2, 3}), torch::randn({3, 1})};
-  ProcessedNode pnode(sigmoid_node, makeInputsArray({0}), 1, 1, true);
+  ProcessedNode pnode(sigmoid_node, createProcessedNodeInputs({0}), 1, true);
   pnode.set_values(values);
 
   ASSERT_EQ(&pnode.Output(0), &values[1]);
@@ -1224,8 +1271,7 @@ TEST(ProcessedNode, VerifyNoMemoryOverlapWithOverlappingOutputs) {
     IValue values[] = {at::randn({2, 3}), at::empty({1, 3}), at::empty({4, 5})};
     ProcessedNode list_unpack_pnode(
         list_unpack_node,
-        makeInputsArray({0}),
-        1,
+        createProcessedNodeInputs({0}),
         1,
         /*enable_out_variant=*/true);
     list_unpack_pnode.set_values(values);
@@ -1236,8 +1282,7 @@ TEST(ProcessedNode, VerifyNoMemoryOverlapWithOverlappingOutputs) {
     IValue values[] = {at::randn({2, 3}), at::empty({1, 3}), at::empty({4, 5})};
     ProcessedNode list_unpack_pnode(
         list_unpack_node,
-        makeInputsArray({0}),
-        1,
+        createProcessedNodeInputs({0}),
         1,
         /*enable_out_variant=*/true);
     list_unpack_pnode.set_values(values);
